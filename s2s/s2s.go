@@ -38,6 +38,11 @@ type splunkSignature struct {
 	mgmtPort   [16]byte
 }
 
+// Interface is the client interface definition
+type Interface interface {
+	Send(event map[string]string) (int64, error)
+}
+
 /*
 NewS2S will initialize S2S
 
