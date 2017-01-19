@@ -206,8 +206,12 @@ func EncodeEvent(line map[string]string) (buf *bytes.Buffer) {
 			msgSize += uint32(len(encodedIndex))
 		case "_raw":
 			break
-		default:
+		case "_time":
 			encoded := encodeKeyValue(k, v)
+			maps = append(maps, encoded)
+			msgSize += uint32(len(encoded))
+		default:
+			encoded := encodeKeyValue("_meta", k+"::"+v)
 			maps = append(maps, encoded)
 			msgSize += uint32(len(encoded))
 		}
