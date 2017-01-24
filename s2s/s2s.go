@@ -186,6 +186,7 @@ func EncodeEvent(line map[string]string) (buf *bytes.Buffer) {
 	msgSize = 8 // Two unsigned 32 bit integers included, the number of maps and a 0 between the end of raw the _raw trailer
 	maps := make([][]byte, 0)
 
+	var indexFields string
 	for k, v := range line {
 		switch k {
 		case "source":
@@ -211,10 +212,15 @@ func EncodeEvent(line map[string]string) (buf *bytes.Buffer) {
 			maps = append(maps, encoded)
 			msgSize += uint32(len(encoded))
 		default:
-			encoded := encodeKeyValue("_meta", k+"::"+v)
-			maps = append(maps, encoded)
-			msgSize += uint32(len(encoded))
+			indexFields += k + "::" + v + " "
 		}
+	}
+
+	if len(indexFields) > 0 {
+		indexFields = strings.TrimRight(indexFields, " ")
+		encoded := encodeKeyValue("_meta", indexFields)
+		maps = append(maps, encoded)
+		msgSize += uint32(len(encoded))
 	}
 
 	encodedRaw := encodeKeyValue("_raw", line["_raw"])
