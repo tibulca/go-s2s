@@ -211,6 +211,10 @@ func EncodeEvent(line map[string]string) (buf *bytes.Buffer) {
 			encoded := encodeKeyValue(k, v)
 			maps = append(maps, encoded)
 			msgSize += uint32(len(encoded))
+			if strings.ContainsRune(v, '.') {
+				subsecs := "." + strings.Split(v, ".")[1]
+				indexFields += "_subsecond::" + subsecs
+			}
 		default:
 			indexFields += k + "::" + v + " "
 		}
