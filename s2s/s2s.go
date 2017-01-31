@@ -30,6 +30,8 @@ type S2S struct {
 	cert               string
 	serverName         string
 	insecureSkipVerify bool
+	rebalanceInterval  int
+	lastConnectTime    time.Time
 }
 
 type splunkSignature struct {
@@ -83,7 +85,7 @@ func NewS2STLS(endpoints []string, bufferBytes int, tls bool, cert string, serve
 	}
 	st.insecureSkipVerify = insecureSkipVerify
 
-	err := st.newBuf()
+	err := st.newBuf(false)
 	if err != nil {
 		return nil, err
 	}
@@ -91,6 +93,7 @@ func NewS2STLS(endpoints []string, bufferBytes int, tls bool, cert string, serve
 	if err != nil {
 		return nil, err
 	}
+	st.rebalanceInterval = 30
 	st.initialized = true
 	return st, nil
 }
@@ -118,6 +121,12 @@ func (st *S2S) connect(endpoint string) error {
 	}
 	st.conn, err = net.DialTimeout("tcp", endpoint, 2*time.Second)
 	return err
+}
+
+// SetRebalanceInterval sets the interval to reconnect to a new random endpoint
+// Defaults to 30 seconds
+func (st *S2S) SetRebalanceInterval(interval int) {
+	st.rebalanceInterval = interval
 }
 
 // sendSig will write the signature to the connection if it has not already been written
@@ -255,6 +264,16 @@ func (st *S2S) Send(event map[string]string) (int64, error) {
 
 // Copy takes a io.Reader and copies it to Splunk, needs to be encoded by EncodeEvent
 func (st *S2S) Copy(r io.Reader) (int64, error) {
+	// Attempt to read from connection to see if it's closed
+	err := st.conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return 0, err
+	}
+	buf := []byte{}
+	_, err = st.conn.Read(buf)
+	if err != nil {
+		st.newBuf(true)
+	}
 	bytes, err := io.Copy(st.buf, r)
 	if err != nil {
 		return 0, err
@@ -266,7 +285,7 @@ func (st *S2S) Copy(r io.Reader) (int64, error) {
 		if err != nil {
 			return 0, err
 		}
-		st.newBuf()
+		st.newBuf(false)
 		st.sent = 0
 	}
 	return bytes, nil
@@ -288,12 +307,15 @@ func (st *S2S) Close() error {
 	return nil
 }
 
-func (st *S2S) newBuf() error {
-	st.endpoint = st.endpoints[rand.Intn(len(st.endpoints))]
-	err := st.connect(st.endpoint)
-	if err != nil {
-		return err
+func (st *S2S) newBuf(force bool) error {
+	if time.Now().Sub(st.lastConnectTime) > time.Duration(st.rebalanceInterval)*time.Second && !force {
+		st.endpoint = st.endpoints[rand.Intn(len(st.endpoints))]
+		err := st.connect(st.endpoint)
+		if err != nil {
+			return err
+		}
 	}
 	st.buf = bufio.NewWriter(st.conn)
+	st.lastConnectTime = time.Now()
 	return nil
 }
