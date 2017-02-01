@@ -11,9 +11,11 @@ import (
 	"math/rand"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"encoding/binary"
+	"syscall"
 )
 
 // S2S sends data to Splunk using the Splunk to Splunk protocol
@@ -32,6 +34,9 @@ type S2S struct {
 	insecureSkipVerify bool
 	rebalanceInterval  int
 	lastConnectTime    time.Time
+	maxIdleTime        int
+	lastSendTime       time.Time
+	mutex              *sync.RWMutex
 }
 
 type splunkSignature struct {
@@ -74,6 +79,7 @@ insecureSkipVerify specifies whether to skip verification of the server certific
 func NewS2STLS(endpoints []string, bufferBytes int, tls bool, cert string, serverName string, insecureSkipVerify bool) (*S2S, error) {
 	st := new(S2S)
 
+	st.mutex = &sync.RWMutex{}
 	st.endpoints = endpoints
 	st.bufferBytes = bufferBytes
 	st.tls = tls
@@ -93,7 +99,8 @@ func NewS2STLS(endpoints []string, bufferBytes int, tls bool, cert string, serve
 	if err != nil {
 		return nil, err
 	}
-	st.rebalanceInterval = 30
+	st.rebalanceInterval = 300
+	st.maxIdleTime = 15
 	st.initialized = true
 	return st, nil
 }
@@ -102,6 +109,10 @@ func NewS2STLS(endpoints []string, bufferBytes int, tls bool, cert string, serve
 // endpoint is the format of 'host:port'
 func (st *S2S) connect(endpoint string) error {
 	var err error
+	st.conn, err = net.DialTimeout("tcp", endpoint, 2*time.Second)
+	if err != nil {
+		return err
+	}
 	if st.tls {
 		config := &tls.Config{
 			InsecureSkipVerify: st.insecureSkipVerify,
@@ -116,10 +127,11 @@ func (st *S2S) connect(endpoint string) error {
 			config.RootCAs = roots
 		}
 
-		st.conn, err = tls.Dial("tcp", endpoint, config)
-		return err
+		st.mutex.Lock()
+		st.conn = tls.Client(st.conn, config)
+		st.mutex.Unlock()
 	}
-	st.conn, err = net.DialTimeout("tcp", endpoint, 2*time.Second)
+	go st.readAndDiscard()
 	return err
 }
 
@@ -264,29 +276,46 @@ func (st *S2S) Send(event map[string]string) (int64, error) {
 
 // Copy takes a io.Reader and copies it to Splunk, needs to be encoded by EncodeEvent
 func (st *S2S) Copy(r io.Reader) (int64, error) {
-	// Attempt to read from connection to see if it's closed
-	err := st.conn.SetReadDeadline(time.Time{})
-	if err != nil {
-		return 0, err
+	if st.closed {
+		return 0, fmt.Errorf("cannot send on closed connection")
 	}
-	buf := []byte{}
-	_, err = st.conn.Read(buf)
-	if err != nil {
+	if time.Now().Sub(st.lastSendTime) > time.Duration(st.maxIdleTime)*time.Second {
 		st.newBuf(true)
 	}
-	bytes, err := io.Copy(st.buf, r)
+	buf := &bytes.Buffer{}
+	io.Copy(buf, r)
+
+	bytes, err := io.Copy(st.buf, buf)
 	if err != nil {
-		return 0, err
+		// Catch closed pipe error, resend
+		switch e := err.(type) {
+		case *net.OpError:
+			if e.Err == syscall.EPIPE {
+				err = st.newBuf(true)
+				if err != nil {
+					return 0, err
+				}
+				bytes, err = io.Copy(st.buf, buf)
+				if err != nil {
+					return 0, err
+				}
+			}
+		default:
+			return 0, err
+		}
 	}
 
 	st.sent += bytes
 	if st.sent > int64(st.bufferBytes) {
+		st.mutex.RLock()
 		err := st.buf.Flush()
+		st.mutex.RUnlock()
 		if err != nil {
 			return 0, err
 		}
 		st.newBuf(false)
 		st.sent = 0
+		st.lastSendTime = time.Now()
 	}
 	return bytes, nil
 }
@@ -294,11 +323,7 @@ func (st *S2S) Copy(r io.Reader) (int64, error) {
 // Close disconnects from Splunk
 func (st *S2S) Close() error {
 	if !st.closed {
-		err := st.buf.Flush()
-		if err != nil {
-			return err
-		}
-		err = st.conn.Close()
+		err := st.close()
 		if err != nil {
 			return err
 		}
@@ -307,9 +332,29 @@ func (st *S2S) Close() error {
 	return nil
 }
 
+func (st *S2S) close() error {
+	st.mutex.Lock()
+	defer st.mutex.Unlock()
+	err := st.buf.Flush()
+	if err != nil {
+		return err
+	}
+	err = st.conn.Close()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (st *S2S) newBuf(force bool) error {
-	if time.Now().Sub(st.lastConnectTime) > time.Duration(st.rebalanceInterval)*time.Second && !force {
+	if time.Now().Sub(st.lastConnectTime) > time.Duration(st.rebalanceInterval)*time.Second || force {
 		st.endpoint = st.endpoints[rand.Intn(len(st.endpoints))]
+		if st.conn != nil {
+			err := st.close()
+			if err != nil {
+				return err
+			}
+		}
 		err := st.connect(st.endpoint)
 		if err != nil {
 			return err
@@ -318,4 +363,23 @@ func (st *S2S) newBuf(force bool) error {
 	st.buf = bufio.NewWriter(st.conn)
 	st.lastConnectTime = time.Now()
 	return nil
+}
+
+func (st *S2S) readAndDiscard() {
+	// Attempt to read from connection to see if it's closed
+	// err := st.conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+	// err := st.conn.SetReadDeadline(time.Time{})
+	for {
+		err := st.conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		if err != nil {
+			st.newBuf(true)
+			break
+		}
+		one := []byte{}
+		_, err = st.conn.Read(one)
+		if err != nil {
+			st.newBuf(true)
+			break
+		}
+	}
 }
