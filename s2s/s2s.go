@@ -101,6 +101,8 @@ func NewS2STLS(endpoints []string, bufferBytes int, tls bool, cert string, serve
 	}
 	st.rebalanceInterval = 300
 	st.maxIdleTime = 15
+	st.lastSendTime = time.Now()
+	st.lastConnectTime = time.Now()
 	st.initialized = true
 	return st, nil
 }
