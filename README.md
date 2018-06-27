@@ -12,5 +12,6 @@ Sample Usage:
 			"source":     "myprog",
 			"sourcetype": "myprog",
 			"_raw":       "Here's an event!",
+			"_time":      "1530024154.040", // if not set, default is time.Now()
 		}
 		err = s.Send(event)

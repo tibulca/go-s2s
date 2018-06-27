@@ -29,7 +29,8 @@ type S2S struct {
 	sent               int64
 	bufferBytes        int
 	tls                bool
-	cert               string
+	rootCA             *x509.Certificate
+	clientCertificates []tls.Certificate
 	serverName         string
 	insecureSkipVerify bool
 	rebalanceInterval  int
@@ -58,7 +59,7 @@ endpoints is a list of endpoint strings, which should be in the format of host:p
 bufferBytes is the max size of the buffer before flushing
 */
 func NewS2S(endpoints []string, bufferBytes int) (*S2S, error) {
-	return NewS2STLS(endpoints, bufferBytes, false, "", "", false)
+	return NewS2STLS(endpoints, bufferBytes, false, nil, nil, "", false)
 }
 
 /*
@@ -70,20 +71,21 @@ bufferBytes is the max size of the buffer before flushing
 
 tls specifies whether to connect with TLS or not
 
-cert is a valid root CA we should use for verifying the server cert
+rootCA is a valid root CA we should use for verifying the server cert
 
 serverName is the name specified in your certificate, will default to "SplunkServerDefaultCert",
 
 insecureSkipVerify specifies whether to skip verification of the server certificate
 */
-func NewS2STLS(endpoints []string, bufferBytes int, tls bool, cert string, serverName string, insecureSkipVerify bool) (*S2S, error) {
+func NewS2STLS(endpoints []string, bufferBytes int, tls bool, rootCA *x509.Certificate, clientCertificates []tls.Certificate, serverName string, insecureSkipVerify bool) (*S2S, error) {
 	st := new(S2S)
 
 	st.mutex = &sync.RWMutex{}
 	st.endpoints = endpoints
 	st.bufferBytes = bufferBytes
 	st.tls = tls
-	st.cert = cert
+	st.rootCA = rootCA
+	st.clientCertificates = clientCertificates
 	if serverName == "" {
 		st.serverName = "SplunkServerDefaultCert"
 	} else {
@@ -120,13 +122,12 @@ func (st *S2S) connect(endpoint string) error {
 			InsecureSkipVerify: st.insecureSkipVerify,
 			ServerName:         st.serverName,
 		}
-		if len(st.cert) > 0 {
-			roots := x509.NewCertPool()
-			ok := roots.AppendCertsFromPEM([]byte(st.cert))
-			if !ok {
-				return fmt.Errorf("Failed to parse root certificate")
-			}
-			config.RootCAs = roots
+		if st.rootCA != nil {
+			config.RootCAs = x509.NewCertPool()
+			config.RootCAs.AddCert(st.rootCA)
+		}
+		if len(st.clientCertificates) > 0 {
+			config.Certificates = st.clientCertificates
 		}
 
 		st.mutex.Lock()

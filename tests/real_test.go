@@ -1,6 +1,8 @@
 package tests
 
 import (
+	"crypto/x509"
+	"encoding/pem"
 	"io/ioutil"
 	"testing"
 
@@ -34,7 +36,7 @@ func TestS2SNoTLS(t *testing.T) {
 
 func TestS2STLSNoCert(t *testing.T) {
 	if runTest {
-		s, err := s2s.NewS2STLS([]string{"localhost:9998"}, 0, true, "", "", true)
+		s, err := s2s.NewS2STLS([]string{"localhost:9998"}, 0, true, nil, nil, "", true)
 		assert.NoError(t, err)
 		event := map[string]string{
 			"index":      "main",
@@ -52,7 +54,12 @@ func TestS2STLSCert(t *testing.T) {
 	if runTest {
 		cert, err := ioutil.ReadFile("c:\\splunk\\etc\\auth\\cacert.pem")
 		assert.NoError(t, err)
-		s, err := s2s.NewS2STLS([]string{"localhost:9998"}, 0, true, string(cert), "", false)
+		block, _ := pem.Decode([]byte(cert))
+
+		rootCA, err := x509.ParseCertificate(block.Bytes)
+		assert.NoError(t, err)
+
+		s, err := s2s.NewS2STLS([]string{"localhost:9998"}, 0, true, rootCA, nil, "", false)
 		assert.NoError(t, err)
 		event := map[string]string{
 			"index":      "main",
