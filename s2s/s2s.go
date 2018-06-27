@@ -231,11 +231,12 @@ func EncodeEvent(line map[string]string) (buf *bytes.Buffer) {
 		case "_raw":
 			break
 		case "_time":
-			encoded := encodeKeyValue(k, v)
+			timeComponents := strings.Split(v, ".")
+			encoded := encodeKeyValue(k, timeComponents[0])
 			maps = append(maps, encoded)
 			msgSize += uint32(len(encoded))
-			if strings.ContainsRune(v, '.') {
-				subsecs := "." + strings.Split(v, ".")[1]
+			if len(timeComponents) > 1 {
+				subsecs := "." + timeComponents[1]
 				indexFields += "_subsecond::" + subsecs + " "
 			}
 		default:
